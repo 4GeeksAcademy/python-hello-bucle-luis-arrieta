@@ -24,8 +24,8 @@ Trabajaremos una etapa a la vez. Antes de continuar, se comprobará su resultado
 
 | Etapa | Alcance | Criterio de cierre | Estado |
 |---|---|---|---|
-| 1 | Entorno UV, dependencias y protección de credenciales | Sincronización, imports y exclusiones de Git comprobados | Verificada; cierre mediante commit y push |
-| 2 | Persistencia CSV y `GET /inventory` | Pruebas de inventario vacío, lectura e IDs estables | Pendiente |
+| 1 | Entorno UV, dependencias y protección de credenciales | Sincronización, imports y exclusiones de Git comprobados | Completada; commit `0649f52` publicado |
+| 2 | Persistencia CSV y `GET /inventory` | Pruebas de inventario vacío, lectura e IDs estables | Verificada; cierre mediante commit y push |
 | 3 | `POST /inventory` | Pruebas de creación, validación y persistencia | Pendiente |
 | 4 | Actualización de stock y alertas | Pruebas de deltas, errores y umbral configurable | Pendiente |
 | 5 | Definición de tools y conexión HTTP | Pruebas de schemas, rutas, parámetros y errores | Pendiente |
@@ -51,12 +51,36 @@ uv run --locked python -c "import fastapi, uvicorn, openai, dotenv, pytest, http
 
 Las etapas siguientes usarán `uv run` para ejecutar Python, pytest y Uvicorn dentro del entorno del proyecto. La integración real de la etapa 8 requerirá una clave y un modelo válidos de Groq; si no están disponibles, se indicará expresamente que esa comprobación queda pendiente.
 
+### Etapa 2: persistencia CSV y consulta
+
+- `api/app.py` expone `GET /inventory`: devuelve HTTP 200 con los productos, o una lista vacía si el CSV no existe, está vacío o solo contiene la cabecera. Consultar el inventario no crea ni modifica el archivo.
+- El CSV usa la cabecera `id,name,quantity,unit`. Cada producto tiene un ID entero positivo y único, un nombre y una unidad no vacíos, y una cantidad numérica finita mayor o igual a cero. Se permiten cantidades fraccionarias y productos con el mismo nombre pero distinto ID.
+- La ruta de `products.csv` se resuelve desde la raíz del proyecto, independientemente del directorio de trabajo. Los IDs se leen del archivo, sin renumerarlos.
+- Un CSV inválido, una codificación incorrecta o un error de lectura devuelve HTTP 500 con un mensaje descriptivo. No se omiten filas inválidas ni se sobrescriben datos para ocultar el error.
+- La función de escritura usa el módulo estándar `csv` y reemplaza el archivo mediante un temporal en el mismo directorio. Si el reemplazo falla, conserva el inventario anterior y elimina el temporal. Esta función queda preparada para la etapa 3, sin exponer todavía endpoints de modificación.
+- **Comprobaciones realizadas:** 23 pruebas con archivos temporales: inventario inexistente o vacío, lectura con IDs estables desde dos clientes independientes, datos inválidos y duplicados, errores de lectura, escritura y lectura de campos con comas, comillas y saltos de línea, conservación del CSV ante un fallo de escritura y ruta independiente del directorio de trabajo. No se han utilizado datos reales.
+- **Límite de esta etapa:** todavía no existen `POST`, `PATCH`, alertas ni agente. La prueba de reinicio del servidor real forma parte de la integración final.
+
+Comprobación de esta etapa desde la raíz del proyecto:
+
+```bash
+uv run --locked python -m pytest tests/test_inventory.py -q
+```
+
+Para consultar manualmente la API:
+
+```bash
+uv run --locked uvicorn api.app:app --reload
+```
+
+El inventario estará disponible en `http://127.0.0.1:8000/inventory` y la documentación interactiva en `http://127.0.0.1:8000/docs`. En esta etapa, un repositorio sin `products.csv` devuelve `[]`.
+
 ## Qué debes hacer
 
 ### API (`api/app.py`)
 
 - [ ] Crear una aplicación FastAPI que almacene los datos de inventario en un fichero `products.csv`.
-- [ ] `GET /inventory` — Devolver la lista completa de productos.
+- [x] `GET /inventory` — Devolver la lista completa de productos.
 - [ ] `POST /inventory` — Añadir un nuevo producto (`name`, `quantity`, `unit`).
 - [ ] `PATCH /inventory/{product_id}` — Actualizar el stock de un producto existente (aceptar un valor `delta`: positivo para entradas de stock, negativo para salidas).
 - [ ] `GET /inventory/alerts` — Devolver todos los productos cuya cantidad esté por debajo de un umbral configurable (por defecto: 10 unidades).
