@@ -18,6 +18,39 @@ Construir dos componentes integrados para gestionar el inventario de una tienda 
 
 El agente debe implementar manualmente el ciclo **Observar → Pensar → Actuar → Actualizar → Repetir**, sin frameworks de agentes.
 
+## Desarrollo por etapas
+
+Trabajaremos una etapa a la vez. Antes de continuar, se comprobará su resultado, se actualizará este documento y se hará un commit y push con los archivos de esa etapa. Después se esperará la aprobación del usuario. Si falla una comprobación o el push, se resolverá el bloqueo antes de avanzar. No se incluirán cambios ajenos, credenciales ni datos de ejecución en los commits.
+
+| Etapa | Alcance | Criterio de cierre | Estado |
+|---|---|---|---|
+| 1 | Entorno UV, dependencias y protección de credenciales | Sincronización, imports y exclusiones de Git comprobados | Verificada; cierre mediante commit y push |
+| 2 | Persistencia CSV y `GET /inventory` | Pruebas de inventario vacío, lectura e IDs estables | Pendiente |
+| 3 | `POST /inventory` | Pruebas de creación, validación y persistencia | Pendiente |
+| 4 | Actualización de stock y alertas | Pruebas de deltas, errores y umbral configurable | Pendiente |
+| 5 | Definición de tools y conexión HTTP | Pruebas de schemas, rutas, parámetros y errores | Pendiente |
+| 6 | Bucle manual y CLI con Groq | Pruebas con LLM simulado, varias tools y salida limpia | Pendiente |
+| 7 | Registro de conversación | Pruebas del formato CSV y adición entre sesiones | Pendiente |
+| 8 | Integración real y documentación de entrega | Suite completa y flujo real con Groq, incluyendo reinicios | Pendiente |
+
+### Etapa 1: entorno seguro y reproducible
+
+- `pyproject.toml` define Python 3.11 o superior y las dependencias de ejecución: FastAPI, Uvicorn, OpenAI y python-dotenv. pytest y httpx se incluyen como dependencias de desarrollo.
+- `uv.lock` fija las versiones resueltas. Para preparar el entorno, instalar UV con `python3 -m pip install uv` si no está disponible y ejecutar `uv sync --locked`.
+- `.gitignore` excluye `.env` y sus variantes, `.venv`, cachés de Python y pytest, y los dos CSV de ejecución en la raíz. No excluye todos los CSV: los futuros fixtures de pruebas pueden versionarse.
+- `.env.example` contiene `GROQ_API_KEY` y `GROQ_MODEL` vacíos, y `API_BASE_URL=http://127.0.0.1:8000`. No contiene secretos. El modelo se elegirá al integrar Groq; todavía no es necesario crear un `.env` real.
+- **Comprobaciones realizadas:** sincronización correcta con Python 3.14.2; importación de las seis dependencias; exclusión de credenciales, entorno y datos; confirmación de que `.env.example` y los CSV de pruebas siguen siendo versionables.
+- **Límite de esta etapa:** todavía no se ha creado la API, el agente ni la suite de pruebas. No se han hecho llamadas a Groq.
+
+Comprobación de las dependencias:
+
+```bash
+uv sync --locked
+uv run --locked python -c "import fastapi, uvicorn, openai, dotenv, pytest, httpx"
+```
+
+Las etapas siguientes usarán `uv run` para ejecutar Python, pytest y Uvicorn dentro del entorno del proyecto. La integración real de la etapa 8 requerirá una clave y un modelo válidos de Groq; si no están disponibles, se indicará expresamente que esa comprobación queda pendiente.
+
 ## Qué debes hacer
 
 ### API (`api/app.py`)

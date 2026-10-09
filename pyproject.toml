@@ -1,0 +1,18 @@
+[project]
+name = "ai-basic-inventory-agent-loop"
+version = "0.1.0"
+description = "Inventory API and manual AI agent loop for coffee shop supplies."
+readme = "README.es.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "openai",
+    "python-dotenv",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "httpx",
+]
