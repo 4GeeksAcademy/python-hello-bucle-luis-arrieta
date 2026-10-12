@@ -28,7 +28,7 @@ Trabajaremos una etapa a la vez. Antes de continuar, se comprobará su resultado
 | 2 | Persistencia CSV y `GET /inventory` | Pruebas de inventario vacío, lectura e IDs estables | Completada; commit `4679b89` publicado |
 | 3 | `POST /inventory` | Pruebas de creación, validación y persistencia | Completada; 50 pruebas superadas; commit `0d64b79` publicado |
 | 4 | Actualización de stock y alertas | Pruebas de deltas, errores y umbral configurable | Verificada; 77 pruebas superadas |
-| 5 | Definición de tools y conexión HTTP | Pruebas de schemas, rutas, parámetros y errores | Pendiente |
+| 5 | Definición de tools y conexión HTTP | Pruebas de schemas, rutas, parámetros y errores | Verificada; 17 pruebas superadas |
 | 6 | Bucle manual y CLI con Groq | Pruebas con LLM simulado, varias tools y salida limpia | Pendiente |
 | 7 | Registro de conversación | Pruebas del formato CSV y adición entre sesiones | Pendiente |
 | 8 | Integración real y documentación de entrega | Suite completa y flujo real con Groq, incluyendo reinicios | Pendiente |
@@ -107,6 +107,20 @@ Comprobación desde la raíz del proyecto:
 uv run --locked python -m pytest tests/test_inventory.py -q
 ```
 
+### Etapa 5: tools y conexión HTTP
+
+- `agent.py` define cuatro tools con el formato de funciones de OpenAI-compatible APIs: `list_inventory`, `create_product`, `adjust_stock` y `list_inventory_alerts`. Cada una tiene nombre, descripción y schema JSON tipado, con campos requeridos y propiedades adicionales prohibidas.
+- `dispatch_tool(tool_name, arguments)` solo permite las cuatro operaciones declaradas y construye rutas fijas. Convierte el ID y `delta` de `adjust_stock` en path y body; envía el umbral de alertas como query opcional. Argumentos faltantes, desconocidos o un ID inválido se devuelven como un resultado JSON de error.
+- La URL se lee de `API_BASE_URL`, con fallback a `http://127.0.0.1:8000`; el cliente HTTP de producción usa timeout de 5 segundos. La función devuelve la respuesta de la API en JSON y convierte errores HTTP, timeout o conexión caída en resultados de error que luego podrán añadirse al historial del LLM.
+- **Comprobaciones realizadas:** 17 pruebas aisladas con `httpx.MockTransport`; schemas, mapeo de método/ruta/query/body, argumentos inválidos, valor predeterminado del umbral y errores HTTP/de transporte. No se realizaron llamadas de red ni a un LLM real.
+- **Límite de esta etapa:** `agent.py` todavía no crea el cliente Groq, el historial, el bucle del agente ni la CLI; eso corresponde a la etapa 6.
+
+Comprobación desde la raíz del proyecto:
+
+```bash
+uv run --locked python -m pytest tests/test_agent.py -q
+```
+
 ## Qué debes hacer
 
 ### API (`api/app.py`)
@@ -120,7 +134,7 @@ uv run --locked python -m pytest tests/test_inventory.py -q
 
 ### Agente (`agent.py`)
 
-- [ ] Definir los endpoints de la API como **tools** para el LLM; cada tool debe tener un `name`, una `description` y `parameters` tipados claramente.
+- [x] Definir los endpoints de la API como **tools** para el LLM; cada tool debe tener un `name`, una `description` y `parameters` tipados claramente.
 - [ ] Implementar el **bucle del agente** completo: Observar → Pensar → Actuar → Actualizar → Repetir.
 - [ ] Mantener el historial de conversación en memoria durante la sesión.
 - [ ] Cuando el LLM seleccione una tool, llamar al endpoint de la API correspondiente e inyectar el resultado de vuelta en el contexto.
