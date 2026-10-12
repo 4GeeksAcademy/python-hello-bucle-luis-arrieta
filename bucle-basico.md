@@ -31,7 +31,7 @@ Trabajaremos una etapa a la vez. Antes de continuar, se comprobará su resultado
 | 5 | Definición de tools y conexión HTTP | Pruebas de schemas, rutas, parámetros y errores | Verificada; 17 pruebas superadas |
 | 6 | Bucle manual y CLI con Groq | Pruebas con LLM simulado, varias tools y salida limpia | Verificada; 118 pruebas superadas |
 | 7 | Registro de conversación | Pruebas del formato CSV y adición entre sesiones | Verificada; 131 pruebas superadas |
-| 8 | Integración real y documentación de entrega | Suite completa y flujo real con Groq, incluyendo reinicios | Pendiente |
+| 8 | Integración real y documentación de entrega | Suite completa y flujo real con Groq, incluyendo reinicios | README y API local verificados; flujo real pendiente por falta de credenciales |
 
 ### Etapa 1: entorno seguro y reproducible
 
@@ -156,6 +156,21 @@ Comprobación desde la raíz del proyecto:
 uv run --locked python -m pytest tests/test_logging.py tests/test_agent.py -q
 ```
 
+### Etapa 8: integración y entrega
+
+- `README.es.md` y `README.md` describen instalación con UV, configuración local de Groq, arranque de API y agente en terminales separadas, endpoints, pruebas y el requisito de un solo worker.
+- **Comprobaciones locales:** `uv sync --locked` terminó correctamente y las 131 pruebas pasaron. Uvicorn arrancó en el puerto documentado; `GET /inventory`, `GET /inventory/alerts` y `GET /openapi.json` respondieron HTTP 200. No se creó ningún CSV de datos. Al no estar configurada la clave, `uv run --locked python agent.py` informó que falta `GROQ_API_KEY` y terminó con código 1 antes de hacer llamadas externas.
+- **Verificación pendiente:** en la terminal comprobada no están configurados `GROQ_API_KEY` ni `GROQ_MODEL`. Por eso no se puede afirmar que una interacción real de alta/alertas con Groq, el reinicio real de Uvicorn ni el append del log entre dos sesiones reales hayan sido verificados. Esos criterios siguen pendientes hasta disponer de configuración local válida.
+
+Con credenciales disponibles, la comprobación pendiente consiste en iniciar API y agente en las dos terminales indicadas en los README, pedir al agente que cree un producto y consulte sus alertas, reiniciar la API y verificar que el producto siga allí, y reiniciar la CLI para confirmar que el CSV de conversación conserva las filas de la sesión anterior.
+
+Comprobación local:
+
+```bash
+uv sync --locked
+uv run --locked python -m pytest -q
+```
+
 ## Qué debes hacer
 
 ### API (`api/app.py`)
@@ -184,7 +199,7 @@ uv run --locked python -m pytest tests/test_logging.py tests/test_agent.py -q
 
 ### General
 
-- [ ] Asegurarse de que la API esté en ejecución antes de iniciar el agente. Documentar en el README cómo arrancar ambos procesos.
+- [x] Asegurarse de que la API esté en ejecución antes de iniciar el agente. Documentar en el README cómo arrancar ambos procesos.
 - [x] **No usar frameworks de agentes** (LangChain, LlamaIndex, AutoGen, etc.). Implementar el bucle manualmente en Python.
 
 ## Qué vamos a evaluar
@@ -221,10 +236,10 @@ Mantener dos terminales abiertas:
 
 ```bash
 # Terminal 1 — API
-uvicorn api.app:app --reload
+uv run --locked uvicorn api.app:app --reload --host 127.0.0.1 --port 8000
 
 # Terminal 2 — agente
-python agent.py
+uv run --locked python agent.py
 ```
 
 Instalar dependencias con:
