@@ -26,7 +26,7 @@ Trabajaremos una etapa a la vez. Antes de continuar, se comprobará su resultado
 |---|---|---|---|
 | 1 | Entorno UV, dependencias y protección de credenciales | Sincronización, imports y exclusiones de Git comprobados | Completada; commit `0649f52` publicado |
 | 2 | Persistencia CSV y `GET /inventory` | Pruebas de inventario vacío, lectura e IDs estables | Completada; commit `4679b89` publicado |
-| 3 | `POST /inventory` | Pruebas de creación, validación y persistencia | 50 pruebas superadas; publicación de esta etapa en curso |
+| 3 | `POST /inventory` | Pruebas de creación, validación y persistencia | Completada; 50 pruebas superadas; commit `0d64b79` publicado |
 | 4 | Actualización de stock y alertas | Pruebas de deltas, errores y umbral configurable | Pendiente |
 | 5 | Definición de tools y conexión HTTP | Pruebas de schemas, rutas, parámetros y errores | Pendiente |
 | 6 | Bucle manual y CLI con Groq | Pruebas con LLM simulado, varias tools y salida limpia | Pendiente |
