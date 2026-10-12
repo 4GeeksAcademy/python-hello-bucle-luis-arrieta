@@ -17,7 +17,7 @@ uv sync --locked
 cp .env.example .env
 ```
 
-Edita `.env` y configura `GROQ_API_KEY` y `GROQ_MODEL`. `API_BASE_URL` usa `http://127.0.0.1:8000` por defecto. Para limitar las rondas de tools, puedes añadir `AGENT_MAX_ITERATIONS=8`.
+Edita `.env` y configura `GROQ_API_KEY` y `GROQ_MODEL=openai/gpt-oss-120b` (modelo verificado con este agente; comprueba que siga disponible en tu cuenta). `API_BASE_URL` usa `http://127.0.0.1:8000` por defecto. Para limitar las rondas de tools, puedes añadir `AGENT_MAX_ITERATIONS=8`.
 
 No subas `.env` ni credenciales al repositorio. El archivo está excluido de Git.
 
