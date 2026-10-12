@@ -2,6 +2,7 @@ import csv
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from threading import Lock
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -9,6 +10,15 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 PRODUCTS_PATH = Path(__file__).resolve().parents[1] / "products.csv"
 CSV_FIELDS = ["id", "name", "quantity", "unit"]
+INVENTORY_LOCK = Lock()
+
+
+class ProductCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    quantity: float = Field(ge=0, allow_inf_nan=False, strict=True)
+    unit: str = Field(min_length=1)
 
 
 class Product(BaseModel):
@@ -80,5 +90,18 @@ app = FastAPI(title="Coffee Shop Inventory")
 def list_inventory(path: Path = Depends(get_inventory_path)) -> list[Product]:
     try:
         return read_inventory(path)
+    except InventoryStorageError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+@app.post("/inventory", response_model=Product, status_code=201)
+def create_product(
+    data: ProductCreate, path: Path = Depends(get_inventory_path)
+) -> Product:
+    try:
+        with INVENTORY_LOCK:
+            products = read_inventory(path)
+            product_id = max((product.id for product in products), default=0) + 1
+            product = Product(id=product_id, **data.model_dump())
+            write_inventory(path, [*products, product])
+        return product
     except InventoryStorageError as error:
         raise HTTPException(status_code=500, detail=str(error)) from error

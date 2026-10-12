@@ -1,4 +1,8 @@
 import csv
+import json
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -174,3 +178,179 @@ def test_default_inventory_path_does_not_depend_on_working_directory(
     monkeypatch.chdir(tmp_path)
 
     assert get_inventory_path() == expected
+
+
+@pytest.mark.parametrize("quantity", [0, 2.5])
+def test_create_product_persists_valid_data(client, inventory_path, quantity):
+    response = client.post(
+        "/inventory",
+        json={"name": "  Coffee beans  ", "quantity": quantity, "unit": " kg "},
+    )
+    expected = {"id": 1, "name": "Coffee beans", "quantity": quantity, "unit": "kg"}
+
+    assert response.status_code == 201
+    assert response.json() == expected
+    assert client.get("/inventory").json() == [expected]
+    assert [product.model_dump() for product in read_inventory(inventory_path)] == [
+        expected
+    ]
+
+
+@pytest.mark.parametrize("content", ["", "id,name,quantity,unit\n"])
+def test_create_product_initializes_empty_inventory(client, inventory_path, content):
+    inventory_path.write_text(content, encoding="utf-8")
+
+    response = client.post(
+        "/inventory", json={"name": "Coffee", "quantity": 1, "unit": "kg"}
+    )
+
+    assert response.status_code == 201
+    assert response.json()["id"] == 1
+    assert len(read_inventory(inventory_path)) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"quantity": 1, "unit": "kg"},
+        {"name": "Coffee", "unit": "kg"},
+        {"name": "Coffee", "quantity": 1},
+        {"name": "", "quantity": 1, "unit": "kg"},
+        {"name": "   ", "quantity": 1, "unit": "kg"},
+        {"name": "Coffee", "quantity": 1, "unit": "   "},
+        {"name": "Coffee", "quantity": -1, "unit": "kg"},
+        {"name": "Coffee", "quantity": "nan", "unit": "kg"},
+        {"name": "Coffee", "quantity": "inf", "unit": "kg"},
+        {"name": "Coffee", "quantity": "2.5", "unit": "kg"},
+        {"name": "Coffee", "quantity": True, "unit": "kg"},
+        {"name": "Coffee", "quantity": None, "unit": "kg"},
+        {"name": 123, "quantity": 1, "unit": "kg"},
+        {"name": "Coffee", "quantity": 1, "unit": None},
+        {"id": 99, "name": "Coffee", "quantity": 1, "unit": "kg"},
+        {"name": "Coffee", "quantity": 1, "unit": "kg", "price": 10},
+    ],
+)
+def test_invalid_product_does_not_change_inventory(client, inventory_path, payload):
+    original = b"id,name,quantity,unit\n7,Milk,2,liters\n"
+    inventory_path.write_bytes(original)
+
+    response = client.post("/inventory", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["detail"]
+    assert inventory_path.read_bytes() == original
+
+
+def test_invalid_product_does_not_create_inventory(client, inventory_path):
+    response = client.post("/inventory", json={})
+
+    assert response.status_code == 422
+    assert not inventory_path.exists()
+
+
+def test_creating_products_preserves_existing_ids_and_allows_repeated_names(
+    client, inventory_path
+):
+    inventory_path.write_text(
+        "id,name,quantity,unit\n7,Coffee,1,kg\n42,Milk,2,liters\n",
+        encoding="utf-8",
+    )
+    payload = {"name": "Coffee", "quantity": 3, "unit": "kg"}
+
+    first_response = client.post("/inventory", json=payload)
+    second_response = client.post("/inventory", json=payload)
+
+    assert first_response.status_code == second_response.status_code == 201
+    assert first_response.json()["id"] == 43
+    assert second_response.json()["id"] == 44
+    products = client.get("/inventory").json()
+    assert [product["id"] for product in products] == [7, 42, 43, 44]
+    assert [product["name"] for product in products] == ["Coffee", "Milk", "Coffee", "Coffee"]
+
+
+def test_product_creation_survives_fresh_api_process(client, inventory_path):
+    response = client.post(
+        "/inventory", json={"name": "Coffee", "quantity": 2.5, "unit": "kg"}
+    )
+    assert response.status_code == 201
+
+    script = """
+import json
+import sys
+from pathlib import Path
+from fastapi.testclient import TestClient
+from api.app import app, get_inventory_path
+
+app.dependency_overrides[get_inventory_path] = lambda: Path(sys.argv[1])
+with TestClient(app) as client:
+    inventory = client.get('/inventory')
+    response = client.post('/inventory', json={'name': 'Milk', 'quantity': 1, 'unit': 'liters'})
+    print(json.dumps({'inventory': inventory.json(), 'status': response.status_code, 'product': response.json()}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(inventory_path)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+    )
+    persisted = json.loads(result.stdout)
+
+    assert persisted["inventory"] == [response.json()]
+    assert persisted["status"] == 201
+    assert persisted["product"]["id"] == 2
+    assert [product.id for product in read_inventory(inventory_path)] == [1, 2]
+
+
+def test_concurrent_product_creation_does_not_lose_products(client, inventory_path):
+    def add_product(index):
+        return client.post(
+            "/inventory", json={"name": f"Coffee {index}", "quantity": 1, "unit": "kg"}
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        responses = list(executor.map(add_product, range(12)))
+
+    assert all(response.status_code == 201 for response in responses)
+    assert sorted(response.json()["id"] for response in responses) == list(range(1, 13))
+    products = read_inventory(inventory_path)
+    assert len(products) == 12
+    assert {product.name for product in products} == {f"Coffee {index}" for index in range(12)}
+
+
+def test_creation_does_not_overwrite_corrupt_inventory(client, inventory_path):
+    original = b"id,name,quantity,unit\n1,Coffee,-1,kg\n"
+    inventory_path.write_bytes(original)
+
+    response = client.post(
+        "/inventory", json={"name": "Milk", "quantity": 1, "unit": "liters"}
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Could not read inventory CSV"}
+    assert inventory_path.read_bytes() == original
+
+
+def test_failed_creation_preserves_inventory_and_does_not_consume_id(
+    client, inventory_path, monkeypatch
+):
+    original = b"id,name,quantity,unit\n7,Coffee,1,kg\n"
+    inventory_path.write_bytes(original)
+    payload = {"name": "Milk", "quantity": 1, "unit": "liters"}
+
+    def fail_replace(source, destination):
+        raise OSError("Simulated storage failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("api.app.os.replace", fail_replace)
+        response = client.post("/inventory", json=payload)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Could not write inventory CSV"}
+    assert inventory_path.read_bytes() == original
+    assert list(inventory_path.parent.iterdir()) == [inventory_path]
+    retry = client.post("/inventory", json=payload)
+    assert retry.status_code == 201
+    assert retry.json()["id"] == 8
