@@ -1,17 +1,20 @@
 import json
 import math
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
+from openai import OpenAI, OpenAIError
 
 
 load_dotenv()
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
 API_TIMEOUT_SECONDS = 5.0
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+DEFAULT_MAX_AGENT_ITERATIONS = 8
 
 TOOLS = [
     {
@@ -127,6 +130,10 @@ def _http_error_result(response: httpx.Response) -> str:
     )
 
 
+def _get_api_base_url(base_url: str | None = None) -> str:
+    return (base_url or os.getenv("API_BASE_URL") or DEFAULT_API_BASE_URL).rstrip("/")
+
+
 def dispatch_tool(
     tool_name: str,
     arguments: Mapping[str, Any],
@@ -175,7 +182,7 @@ def dispatch_tool(
         path = "/inventory"
         request_options = {}
 
-    api_base_url = (base_url or os.getenv("API_BASE_URL") or DEFAULT_API_BASE_URL).rstrip("/")
+    api_base_url = _get_api_base_url(base_url)
     url = f"{api_base_url}{path}"
 
     try:
@@ -194,3 +201,203 @@ def dispatch_tool(
         return _json_result({"error": "Could not reach the inventory API"})
     except (TypeError, ValueError, OverflowError):
         return _argument_error("Arguments must contain valid JSON values")
+
+
+class AgentConfigurationError(RuntimeError):
+    pass
+
+
+class APIUnavailableError(RuntimeError):
+    pass
+
+
+class AgentProviderError(RuntimeError):
+    pass
+
+
+class AgentLoopLimitError(RuntimeError):
+    pass
+
+
+def create_llm_client() -> tuple[OpenAI, str]:
+    load_dotenv()
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    model = os.getenv("GROQ_MODEL", "").strip()
+    if not api_key:
+        raise AgentConfigurationError("GROQ_API_KEY is not configured")
+    if not model:
+        raise AgentConfigurationError("GROQ_MODEL is not configured")
+    return OpenAI(api_key=api_key, base_url=GROQ_BASE_URL), model
+
+
+def get_max_agent_iterations() -> int:
+    value = os.getenv("AGENT_MAX_ITERATIONS", str(DEFAULT_MAX_AGENT_ITERATIONS))
+    try:
+        max_iterations = int(value)
+    except ValueError as error:
+        raise AgentConfigurationError(
+            "AGENT_MAX_ITERATIONS must be a positive integer"
+        ) from error
+    if max_iterations < 1:
+        raise AgentConfigurationError("AGENT_MAX_ITERATIONS must be a positive integer")
+    return max_iterations
+
+
+def check_api_available(
+    *, base_url: str | None = None, client: httpx.Client | None = None
+) -> None:
+    url = f"{_get_api_base_url(base_url)}/inventory"
+    try:
+        if client is None:
+            with httpx.Client(timeout=API_TIMEOUT_SECONDS) as api_client:
+                response = api_client.get(url)
+        else:
+            response = client.get(url)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        raise APIUnavailableError(
+            f"Inventory API returned HTTP {error.response.status_code}"
+        ) from error
+    except httpx.TimeoutException as error:
+        raise APIUnavailableError("Inventory API health check timed out") from error
+    except httpx.RequestError as error:
+        raise APIUnavailableError("Could not reach the inventory API") from error
+
+
+def run_agent_turn(
+    user_message: str,
+    llm_client: OpenAI,
+    model: str,
+    *,
+    messages: list[dict[str, Any]] | None = None,
+    max_iterations: int = DEFAULT_MAX_AGENT_ITERATIONS,
+    tool_executor: Callable[[str, Mapping[str, Any]], str] = dispatch_tool,
+) -> str:
+    if not user_message.strip():
+        raise ValueError("User message cannot be empty")
+    if max_iterations < 1:
+        raise ValueError("max_iterations must be a positive integer")
+
+    conversation = messages if messages is not None else []
+    conversation.append({"role": "user", "content": user_message})
+
+    for _iteration in range(max_iterations):
+        try:
+            completion = llm_client.chat.completions.create(
+                model=model,
+                messages=conversation,
+                tools=TOOLS,
+                tool_choice="auto",
+            )
+        except OpenAIError as error:
+            raise AgentProviderError("The Groq request failed") from error
+
+        if not completion.choices:
+            raise AgentProviderError("The LLM returned no response choices")
+
+        response_message = completion.choices[0].message
+        tool_calls = response_message.tool_calls or []
+        assistant_message = {
+            "role": "assistant",
+            "content": response_message.content,
+        }
+
+        if not tool_calls:
+            conversation.append(assistant_message)
+            return response_message.content or ""
+
+        assistant_message["tool_calls"] = [
+            {
+                "id": tool_call.id,
+                "type": "function",
+                "function": {
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments,
+                },
+            }
+            for tool_call in tool_calls
+        ]
+        conversation.append(assistant_message)
+
+        for tool_call in tool_calls:
+            if not tool_call.id:
+                raise AgentProviderError("The LLM returned a tool call without an ID")
+
+            try:
+                arguments = json.loads(tool_call.function.arguments or "{}")
+            except (json.JSONDecodeError, TypeError):
+                result = _argument_error("Tool arguments are not valid JSON")
+            else:
+                if not isinstance(arguments, dict):
+                    result = _argument_error("Tool arguments must be a JSON object")
+                else:
+                    try:
+                        result = tool_executor(tool_call.function.name, arguments)
+                    except Exception:
+                        result = _json_result({"error": "Tool execution failed"})
+
+            conversation.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "content": result,
+                }
+            )
+
+    raise AgentLoopLimitError(
+        f"The agent reached its limit of {max_iterations} tool iterations"
+    )
+
+
+def main() -> int:
+    try:
+        llm_client, model = create_llm_client()
+        max_iterations = get_max_agent_iterations()
+    except AgentConfigurationError as error:
+        print(f"Configuration error: {error}")
+        return 1
+
+    try:
+        check_api_available()
+    except APIUnavailableError as error:
+        print(f"Inventory API unavailable: {error}")
+        return 1
+
+    conversation: list[dict[str, Any]] = []
+    print("Inventory agent ready. Type /exit to quit.")
+    while True:
+        try:
+            user_message = input("You: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nSession ended.")
+            return 0
+
+        if user_message.strip().lower() in {"/exit", "exit", "quit"}:
+            return 0
+        if not user_message.strip():
+            continue
+
+        try:
+            answer = run_agent_turn(
+                user_message,
+                llm_client,
+                model,
+                messages=conversation,
+                max_iterations=max_iterations,
+            )
+        except AgentProviderError as error:
+            print(f"Agent request failed: {error}")
+        except AgentLoopLimitError as error:
+            print(f"Agent stopped: {error}")
+        except KeyboardInterrupt:
+            print("\nSession ended.")
+            return 0
+        else:
+            print(f"Agent: {answer}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

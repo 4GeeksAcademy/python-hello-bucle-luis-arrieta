@@ -29,7 +29,7 @@ Trabajaremos una etapa a la vez. Antes de continuar, se comprobará su resultado
 | 3 | `POST /inventory` | Pruebas de creación, validación y persistencia | Completada; 50 pruebas superadas; commit `0d64b79` publicado |
 | 4 | Actualización de stock y alertas | Pruebas de deltas, errores y umbral configurable | Verificada; 77 pruebas superadas |
 | 5 | Definición de tools y conexión HTTP | Pruebas de schemas, rutas, parámetros y errores | Verificada; 17 pruebas superadas |
-| 6 | Bucle manual y CLI con Groq | Pruebas con LLM simulado, varias tools y salida limpia | Pendiente |
+| 6 | Bucle manual y CLI con Groq | Pruebas con LLM simulado, varias tools y salida limpia | Verificada; 118 pruebas superadas |
 | 7 | Registro de conversación | Pruebas del formato CSV y adición entre sesiones | Pendiente |
 | 8 | Integración real y documentación de entrega | Suite completa y flujo real con Groq, incluyendo reinicios | Pendiente |
 
@@ -113,13 +113,32 @@ uv run --locked python -m pytest tests/test_inventory.py -q
 - `dispatch_tool(tool_name, arguments)` solo permite las cuatro operaciones declaradas y construye rutas fijas. Convierte el ID y `delta` de `adjust_stock` en path y body; envía el umbral de alertas como query opcional. Argumentos faltantes, desconocidos o un ID inválido se devuelven como un resultado JSON de error.
 - La URL se lee de `API_BASE_URL`, con fallback a `http://127.0.0.1:8000`; el cliente HTTP de producción usa timeout de 5 segundos. La función devuelve la respuesta de la API en JSON y convierte errores HTTP, timeout o conexión caída en resultados de error que luego podrán añadirse al historial del LLM.
 - **Comprobaciones realizadas:** 17 pruebas aisladas con `httpx.MockTransport`; schemas, mapeo de método/ruta/query/body, argumentos inválidos, valor predeterminado del umbral y errores HTTP/de transporte. No se realizaron llamadas de red ni a un LLM real.
-- **Límite de esta etapa:** `agent.py` todavía no crea el cliente Groq, el historial, el bucle del agente ni la CLI; eso corresponde a la etapa 6.
+- **Límite al cerrar esta etapa:** todavía no incluía el cliente Groq, el historial, el bucle ni la CLI; se añadieron en la etapa 6.
 
 Comprobación desde la raíz del proyecto:
 
 ```bash
 uv run --locked python -m pytest tests/test_agent.py -q
 ```
+
+### Etapa 6: bucle manual y CLI
+
+- `create_llm_client()` configura el SDK de OpenAI con el endpoint compatible de Groq, usando `GROQ_API_KEY` y `GROQ_MODEL` del entorno o `.env`. La clave nunca se imprime. `AGENT_MAX_ITERATIONS` configura el límite de rondas de tools y toma el valor 8 si no se especifica.
+- Antes de mostrar el prompt, `agent.py` consulta `GET /inventory`; si la API responde con error, no está disponible o vence el timeout, la CLI termina con un mensaje y código de salida no exitoso.
+- `run_agent_turn()` conserva los mensajes de la sesión, envía el historial y las tools al LLM, ejecuta todas las tools solicitadas y devuelve cada resultado con el `tool_call_id` correspondiente antes de pedir la siguiente respuesta. Cuando el modelo responde sin llamadas pendientes, termina el turno y devuelve su texto.
+- Las llamadas con JSON inválido reciben un resultado de error asociado a su ID; errores del proveedor y el límite de iteraciones terminan el turno de forma controlada. La CLI acepta mensajes hasta `/exit` y cierra limpiamente ante EOF o Ctrl+C.
+- **Comprobaciones realizadas:** 41 pruebas del agente y 118 pruebas en la suite completa. Incluyen un LLM simulado para respuesta final, una tool, llamadas múltiples y el flujo de alta seguido de alertas; historial y `tool_call_id`; límite de rondas, JSON inválido y errores de proveedor/tool/API; configuración Groq; CLI, EOF y salida. No se hicieron llamadas reales a Groq ni a la API desde estas pruebas.
+- **Límite de esta etapa:** `GROQ_API_KEY` no estaba establecida en la terminal revisada. La prueba real con un modelo y una API iniciados se mantiene para la etapa 8. El registro CSV de conversaciones queda para la etapa 7.
+
+Configuración y ejecución:
+
+```bash
+cp .env.example .env
+# Completar GROQ_API_KEY y GROQ_MODEL en .env
+uv run --locked python agent.py
+```
+
+Opcionalmente, añade `AGENT_MAX_ITERATIONS=8` a `.env` para ajustar el límite. El ciclo está implementado manualmente, sin frameworks de agentes.
 
 ## Qué debes hacer
 
@@ -135,11 +154,11 @@ uv run --locked python -m pytest tests/test_agent.py -q
 ### Agente (`agent.py`)
 
 - [x] Definir los endpoints de la API como **tools** para el LLM; cada tool debe tener un `name`, una `description` y `parameters` tipados claramente.
-- [ ] Implementar el **bucle del agente** completo: Observar → Pensar → Actuar → Actualizar → Repetir.
-- [ ] Mantener el historial de conversación en memoria durante la sesión.
-- [ ] Cuando el LLM seleccione una tool, llamar al endpoint de la API correspondiente e inyectar el resultado de vuelta en el contexto.
-- [ ] Terminar el bucle de forma limpia cuando el LLM devuelva una respuesta final sin llamadas a tools pendientes.
-- [ ] Exponer una interfaz CLI sencilla: leer el input del usuario desde el terminal e imprimir la respuesta del agente.
+- [x] Implementar el **bucle del agente** completo: Observar → Pensar → Actuar → Actualizar → Repetir.
+- [x] Mantener el historial de conversación en memoria durante la sesión.
+- [x] Cuando el LLM seleccione una tool, llamar al endpoint de la API correspondiente e inyectar el resultado de vuelta en el contexto.
+- [x] Terminar el bucle de forma limpia cuando el LLM devuelva una respuesta final sin llamadas a tools pendientes.
+- [x] Exponer una interfaz CLI sencilla: leer el input del usuario desde el terminal e imprimir la respuesta del agente.
 
 ### Registro de conversación
 
@@ -150,7 +169,7 @@ uv run --locked python -m pytest tests/test_agent.py -q
 ### General
 
 - [ ] Asegurarse de que la API esté en ejecución antes de iniciar el agente. Documentar en el README cómo arrancar ambos procesos.
-- [ ] **No usar frameworks de agentes** (LangChain, LlamaIndex, AutoGen, etc.). Implementar el bucle manualmente en Python puro.
+- [x] **No usar frameworks de agentes** (LangChain, LlamaIndex, AutoGen, etc.). Implementar el bucle manualmente en Python.
 
 ## Qué vamos a evaluar
 
