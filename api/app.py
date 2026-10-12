@@ -1,10 +1,11 @@
 import csv
+import math
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from threading import Lock
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Path as PathParameter, Query
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
@@ -19,6 +20,12 @@ class ProductCreate(BaseModel):
     name: str = Field(min_length=1)
     quantity: float = Field(ge=0, allow_inf_nan=False, strict=True)
     unit: str = Field(min_length=1)
+
+
+class StockAdjustment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delta: float = Field(allow_inf_nan=False, strict=True)
 
 
 class Product(BaseModel):
@@ -92,6 +99,59 @@ def list_inventory(path: Path = Depends(get_inventory_path)) -> list[Product]:
         return read_inventory(path)
     except InventoryStorageError as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@app.patch("/inventory/{product_id}", response_model=Product)
+def adjust_stock(
+    data: StockAdjustment,
+    product_id: int = PathParameter(gt=0),
+    path: Path = Depends(get_inventory_path),
+) -> Product:
+    try:
+        with INVENTORY_LOCK:
+            products = read_inventory(path)
+            product_index = next(
+                (
+                    index
+                    for index, product in enumerate(products)
+                    if product.id == product_id
+                ),
+                None,
+            )
+            if product_index is None:
+                raise HTTPException(status_code=404, detail="Product not found")
+
+            current_product = products[product_index]
+            new_quantity = current_product.quantity + data.delta
+            if not math.isfinite(new_quantity) or new_quantity < 0:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Stock quantity must remain finite and non-negative",
+                )
+
+            updated_product = current_product.model_copy(
+                update={"quantity": new_quantity}
+            )
+            products[product_index] = updated_product
+            write_inventory(path, products)
+        return updated_product
+    except InventoryStorageError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@app.get("/inventory/alerts", response_model=list[Product])
+def list_inventory_alerts(
+    threshold: float = Query(default=10, ge=0, allow_inf_nan=False),
+    path: Path = Depends(get_inventory_path),
+) -> list[Product]:
+    try:
+        return [
+            product for product in read_inventory(path) if product.quantity < threshold
+        ]
+    except InventoryStorageError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+
 @app.post("/inventory", response_model=Product, status_code=201)
 def create_product(
     data: ProductCreate, path: Path = Depends(get_inventory_path)

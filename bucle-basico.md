@@ -27,7 +27,7 @@ Trabajaremos una etapa a la vez. Antes de continuar, se comprobará su resultado
 | 1 | Entorno UV, dependencias y protección de credenciales | Sincronización, imports y exclusiones de Git comprobados | Completada; commit `0649f52` publicado |
 | 2 | Persistencia CSV y `GET /inventory` | Pruebas de inventario vacío, lectura e IDs estables | Completada; commit `4679b89` publicado |
 | 3 | `POST /inventory` | Pruebas de creación, validación y persistencia | Completada; 50 pruebas superadas; commit `0d64b79` publicado |
-| 4 | Actualización de stock y alertas | Pruebas de deltas, errores y umbral configurable | Pendiente |
+| 4 | Actualización de stock y alertas | Pruebas de deltas, errores y umbral configurable | Verificada; 77 pruebas superadas |
 | 5 | Definición de tools y conexión HTTP | Pruebas de schemas, rutas, parámetros y errores | Pendiente |
 | 6 | Bucle manual y CLI con Groq | Pruebas con LLM simulado, varias tools y salida limpia | Pendiente |
 | 7 | Registro de conversación | Pruebas del formato CSV y adición entre sesiones | Pendiente |
@@ -91,6 +91,22 @@ Comprobación desde la raíz del proyecto:
 uv run --locked python -m pytest tests/test_inventory.py -q
 ```
 
+### Etapa 4: actualización de stock y alertas
+
+- `PATCH /inventory/{product_id}` acepta `{"delta": número}` y devuelve HTTP 200 con el producto actualizado. Un delta positivo aumenta el stock y uno negativo lo reduce; cero es válido. El stock final debe ser finito y no negativo.
+- El delta debe ser un número JSON finito, no un booleano ni texto; no se aceptan campos adicionales. El ID del path debe ser positivo. Una solicitud inválida o un stock final negativo/no finito devuelve HTTP 422 sin modificar el CSV. Un ID inexistente devuelve HTTP 404.
+- `GET /inventory/alerts` devuelve los productos cuya cantidad sea **estrictamente menor** que `threshold`, que por defecto es 10. El umbral configurable debe ser finito y no negativo; una cantidad exactamente igual al umbral no genera alerta.
+- Ambas escrituras (alta y ajuste de stock) usan el mismo bloqueo durante la lectura, modificación y reemplazo atómico del CSV. Esto evita perder actualizaciones concurrentes dentro del proceso; el servidor sigue requiriendo **un solo worker**, ya que el bloqueo no coordina procesos distintos.
+- Los errores de lectura o guardado mantienen la respuesta HTTP 500 descriptiva ya establecida y no descartan los datos anteriores. Consultar alertas no crea ni modifica el archivo.
+- **Comprobaciones realizadas:** 77 pruebas en total, incluidas las 50 anteriores. Las nuevas cubren deltas positivos, negativos y cero; ID inexistente; stock negativo y desbordamiento sin modificar datos; payloads inválidos; fallos de guardado; 12 ajustes concurrentes; umbral predeterminado y personalizado, frontera estricta, valores inválidos y CSV corrupto. Todas usan CSV temporales.
+- **Límite de esta etapa:** no se han añadido tools, agente ni registro de conversaciones. La concurrencia entre procesos queda fuera de alcance.
+
+Comprobación desde la raíz del proyecto:
+
+```bash
+uv run --locked python -m pytest tests/test_inventory.py -q
+```
+
 ## Qué debes hacer
 
 ### API (`api/app.py`)
@@ -98,9 +114,9 @@ uv run --locked python -m pytest tests/test_inventory.py -q
 - [x] Crear una aplicación FastAPI que almacene los datos de inventario en un fichero `products.csv`.
 - [x] `GET /inventory` — Devolver la lista completa de productos.
 - [x] `POST /inventory` — Añadir un nuevo producto (`name`, `quantity`, `unit`).
-- [ ] `PATCH /inventory/{product_id}` — Actualizar el stock de un producto existente (aceptar un valor `delta`: positivo para entradas de stock, negativo para salidas).
-- [ ] `GET /inventory/alerts` — Devolver todos los productos cuya cantidad esté por debajo de un umbral configurable (por defecto: 10 unidades).
-- [ ] Hacer que todos los endpoints devuelvan códigos de estado HTTP apropiados y mensajes descriptivos en caso de error.
+- [x] `PATCH /inventory/{product_id}` — Actualizar el stock de un producto existente (aceptar un valor `delta`: positivo para entradas de stock, negativo para salidas).
+- [x] `GET /inventory/alerts` — Devolver todos los productos cuya cantidad esté por debajo de un umbral configurable (por defecto: 10 unidades).
+- [x] Hacer que todos los endpoints devuelvan códigos de estado HTTP apropiados y mensajes descriptivos en caso de error.
 
 ### Agente (`agent.py`)
 

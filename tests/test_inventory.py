@@ -354,3 +354,180 @@ def test_failed_creation_preserves_inventory_and_does_not_consume_id(
     retry = client.post("/inventory", json=payload)
     assert retry.status_code == 201
     assert retry.json()["id"] == 8
+
+
+@pytest.mark.parametrize(
+    ("starting_quantity", "delta", "expected_quantity"),
+    [(2, 3, 5), (2.5, -1.25, 1.25), (0, 0, 0)],
+)
+def test_adjust_stock_persists_positive_negative_and_zero_deltas(
+    client, inventory_path, starting_quantity, delta, expected_quantity
+):
+    inventory_path.write_text(
+        f"id,name,quantity,unit\n7,Coffee,{starting_quantity},kg\n",
+        encoding="utf-8",
+    )
+
+    response = client.patch("/inventory/7", json={"delta": delta})
+
+    expected = {"id": 7, "name": "Coffee", "quantity": expected_quantity, "unit": "kg"}
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert client.get("/inventory").json() == [expected]
+    assert read_inventory(inventory_path)[0].quantity == expected_quantity
+
+
+def test_adjust_stock_returns_404_for_unknown_product(client, inventory_path):
+    original = b"id,name,quantity,unit\n7,Coffee,2,kg\n"
+    inventory_path.write_bytes(original)
+
+    response = client.patch("/inventory/42", json={"delta": 1})
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Product not found"}
+    assert inventory_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("product_id", [0, -1])
+def test_adjust_stock_rejects_non_positive_product_ids(client, product_id):
+    response = client.patch(f"/inventory/{product_id}", json={"delta": 1})
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"delta": "1"},
+        {"delta": True},
+        {"delta": None},
+        {"delta": "nan"},
+        {"delta": "inf"},
+        {"delta": 1, "quantity": 5},
+    ],
+)
+def test_adjust_stock_rejects_invalid_deltas_without_modifying_csv(
+    client, inventory_path, payload
+):
+    original = b"id,name,quantity,unit\n7,Coffee,2,kg\n"
+    inventory_path.write_bytes(original)
+
+    response = client.patch("/inventory/7", json=payload)
+
+    assert response.status_code == 422
+    assert inventory_path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "delta",
+    [-3, 1.7e308],
+)
+def test_adjust_stock_rejects_negative_or_overflowing_results(
+    client, inventory_path, delta
+):
+    starting_quantity = 2 if delta < 0 else 1.7e308
+    original = f"id,name,quantity,unit\n7,Coffee,{starting_quantity},kg\n".encode()
+    inventory_path.write_bytes(original)
+
+    response = client.patch("/inventory/7", json={"delta": delta})
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "Stock quantity must remain finite and non-negative"
+    }
+    assert inventory_path.read_bytes() == original
+
+
+def test_failed_stock_write_preserves_inventory(client, inventory_path, monkeypatch):
+    original = b"id,name,quantity,unit\n7,Coffee,2,kg\n"
+    inventory_path.write_bytes(original)
+
+    def fail_replace(source, destination):
+        raise OSError("Simulated storage failure")
+
+    monkeypatch.setattr("api.app.os.replace", fail_replace)
+
+    response = client.patch("/inventory/7", json={"delta": 1})
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Could not write inventory CSV"}
+    assert inventory_path.read_bytes() == original
+    assert list(inventory_path.parent.iterdir()) == [inventory_path]
+
+
+def test_concurrent_stock_adjustments_do_not_lose_updates(client, inventory_path):
+    inventory_path.write_text(
+        "id,name,quantity,unit\n7,Coffee,0,kg\n", encoding="utf-8"
+    )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        responses = list(
+            executor.map(
+                lambda _: client.patch("/inventory/7", json={"delta": 1}),
+                range(12),
+            )
+        )
+
+    assert all(response.status_code == 200 for response in responses)
+    assert read_inventory(inventory_path)[0].quantity == 12
+
+
+def test_alerts_use_default_threshold_and_exclude_boundary(client, inventory_path):
+    inventory_path.write_text(
+        "id,name,quantity,unit\n1,Beans,2,kg\n2,Milk,9.99,liters\n"
+        "3,Syrup,10,bottles\n4,Cups,12,boxes\n",
+        encoding="utf-8",
+    )
+    original = inventory_path.read_bytes()
+
+    response = client.get("/inventory/alerts")
+
+    assert response.status_code == 200
+    assert [product["id"] for product in response.json()] == [1, 2]
+    assert inventory_path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("threshold", "expected_ids"),
+    [(3, [1]), (0, []), (12, [1, 2, 3])],
+)
+def test_alerts_accept_custom_threshold(
+    client, inventory_path, threshold, expected_ids
+):
+    inventory_path.write_text(
+        "id,name,quantity,unit\n1,Beans,2,kg\n2,Milk,9.99,liters\n"
+        "3,Syrup,10,bottles\n4,Cups,12,boxes\n",
+        encoding="utf-8",
+    )
+
+    response = client.get("/inventory/alerts", params={"threshold": threshold})
+
+    assert response.status_code == 200
+    assert [product["id"] for product in response.json()] == expected_ids
+
+
+@pytest.mark.parametrize("threshold", ["-1", "nan", "inf", "not-a-number"])
+def test_alerts_reject_invalid_thresholds(client, threshold):
+    response = client.get("/inventory/alerts", params={"threshold": threshold})
+
+    assert response.status_code == 422
+
+
+def test_alerts_on_missing_inventory_return_empty_list(client, inventory_path):
+    response = client.get("/inventory/alerts")
+
+    assert response.status_code == 200
+    assert response.json() == []
+    assert not inventory_path.exists()
+
+
+def test_alerts_report_corrupt_inventory_without_modifying_it(client, inventory_path):
+    original = b"id,name,quantity,unit\n1,Beans,-1,kg\n"
+    inventory_path.write_bytes(original)
+
+    response = client.get("/inventory/alerts")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Could not read inventory CSV"}
+    assert inventory_path.read_bytes() == original
