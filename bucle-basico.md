@@ -30,7 +30,7 @@ Trabajaremos una etapa a la vez. Antes de continuar, se comprobará su resultado
 | 4 | Actualización de stock y alertas | Pruebas de deltas, errores y umbral configurable | Verificada; 77 pruebas superadas |
 | 5 | Definición de tools y conexión HTTP | Pruebas de schemas, rutas, parámetros y errores | Verificada; 17 pruebas superadas |
 | 6 | Bucle manual y CLI con Groq | Pruebas con LLM simulado, varias tools y salida limpia | Verificada; 118 pruebas superadas |
-| 7 | Registro de conversación | Pruebas del formato CSV y adición entre sesiones | Pendiente |
+| 7 | Registro de conversación | Pruebas del formato CSV y adición entre sesiones | Verificada; 131 pruebas superadas |
 | 8 | Integración real y documentación de entrega | Suite completa y flujo real con Groq, incluyendo reinicios | Pendiente |
 
 ### Etapa 1: entorno seguro y reproducible
@@ -140,6 +140,22 @@ uv run --locked python agent.py
 
 Opcionalmente, añade `AGENT_MAX_ITERATIONS=8` a `.env` para ajustar el límite. El ciclo está implementado manualmente, sin frameworks de agentes.
 
+### Etapa 7: registro persistente de conversación
+
+- `conversation_log.csv` se crea en la raíz del proyecto al registrar el primer evento. La cabecera única y el orden de columnas son `actor,message,tool_call,timestamp`.
+- Cada turno registra el mensaje `user`, la respuesta `agent`, cada llamada de tool como `agent` y cada resultado como `tool`. `tool_call` contiene el nombre de la tool cuando corresponde y queda vacío en otros eventos.
+- Los timestamps se generan en UTC con formato ISO 8601 y zona explícita. El módulo estándar `csv` preserva Unicode, comas, comillas y saltos de línea dentro de los campos.
+- El archivo se abre en modo de adición; se valida una cabecera existente y nunca se reemplazan las filas previas. Un bloqueo serializa escrituras dentro del proceso. Si la escritura falla, el turno se detiene con un error en vez de continuar silenciosamente sin registro.
+- La CLI inyecta el escritor real en el bucle. Las pruebas de `run_agent_turn()` pueden inyectar un escritor en memoria y las pruebas del CSV usan exclusivamente archivos en directorios temporales.
+- **Comprobaciones realizadas:** pruebas para cabecera/campos, timestamps UTC, eventos de varias sesiones, escaping de valores, cabecera inválida, errores de escritura y el orden de eventos de una conversación con tool call. También se comprueba que una llamada malformada se registra antes de devolver su error.
+- **Límite de esta etapa:** no se registra actividad de varios procesos concurrentes. La interacción real con Groq y la persistencia tras sesiones CLI reales se comprobarán en la etapa 8.
+
+Comprobación desde la raíz del proyecto:
+
+```bash
+uv run --locked python -m pytest tests/test_logging.py tests/test_agent.py -q
+```
+
 ## Qué debes hacer
 
 ### API (`api/app.py`)
@@ -162,9 +178,9 @@ Opcionalmente, añade `AGENT_MAX_ITERATIONS=8` a `.env` para ajustar el límite.
 
 ### Registro de conversación
 
-- [ ] Añadir cada evento (mensaje del usuario, respuesta del agente, llamada a tool y resultado de tool) al fichero `conversation_log.csv`.
-- [ ] Incluir los cuatro campos requeridos en el CSV: `actor`, `message`, `tool_call`, `timestamp`.
-- [ ] Hacer que el fichero persista entre sesiones (solo adición; nunca sobreescribir).
+- [x] Añadir cada evento (mensaje del usuario, respuesta del agente, llamada a tool y resultado de tool) al fichero `conversation_log.csv`.
+- [x] Incluir los cuatro campos requeridos en el CSV: `actor`, `message`, `tool_call`, `timestamp`.
+- [x] Hacer que el fichero persista entre sesiones (solo adición; nunca sobreescribir).
 
 ### General
 

@@ -1,7 +1,11 @@
+import csv
 import json
 import math
 import os
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
+from pathlib import Path
+from threading import Lock
 from typing import Any
 
 import httpx
@@ -15,6 +19,10 @@ DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
 API_TIMEOUT_SECONDS = 5.0
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_MAX_AGENT_ITERATIONS = 8
+CONVERSATION_LOG_PATH = Path(__file__).resolve().parent / "conversation_log.csv"
+CONVERSATION_LOG_FIELDS = ["actor", "message", "tool_call", "timestamp"]
+CONVERSATION_LOG_ACTORS = {"user", "agent", "tool"}
+CONVERSATION_LOG_LOCK = Lock()
 
 TOOLS = [
     {
@@ -219,6 +227,62 @@ class AgentLoopLimitError(RuntimeError):
     pass
 
 
+class ConversationLogError(RuntimeError):
+    pass
+
+
+def append_conversation_event(
+    actor: str,
+    message: str,
+    tool_call: str | None = None,
+    *,
+    path: Path = CONVERSATION_LOG_PATH,
+    timestamp: datetime | None = None,
+) -> None:
+    if not isinstance(actor, str) or actor not in CONVERSATION_LOG_ACTORS:
+        raise ConversationLogError("Invalid conversation event actor")
+    if not isinstance(message, str):
+        raise ConversationLogError("Conversation event message must be text")
+    if tool_call is not None and not isinstance(tool_call, str):
+        raise ConversationLogError("Tool call name must be text")
+
+    event_time = timestamp or datetime.now(timezone.utc)
+    if event_time.tzinfo is None or event_time.utcoffset() is None:
+        raise ConversationLogError("Conversation timestamp must include a timezone")
+
+    log_path = Path(path)
+    row = {
+        "actor": actor,
+        "message": message,
+        "tool_call": tool_call or "",
+        "timestamp": event_time.astimezone(timezone.utc).isoformat(),
+    }
+
+    try:
+        with CONVERSATION_LOG_LOCK:
+            with log_path.open("a+", encoding="utf-8", newline="") as log_file:
+                log_file.seek(0)
+                existing_header = next(csv.reader(log_file), None)
+                writer = csv.DictWriter(log_file, fieldnames=CONVERSATION_LOG_FIELDS)
+                if existing_header is None:
+                    writer.writeheader()
+                elif existing_header != CONVERSATION_LOG_FIELDS:
+                    raise ConversationLogError("Invalid conversation log CSV header")
+
+                log_file.seek(0, os.SEEK_END)
+                if log_file.tell() > 0:
+                    with log_path.open("rb") as existing_log:
+                        existing_log.seek(-1, os.SEEK_END)
+                        if existing_log.read(1) not in {b"\n", b"\r"}:
+                            log_file.write("\n")
+                writer.writerow(row)
+                log_file.flush()
+    except ConversationLogError:
+        raise
+    except (OSError, UnicodeError, csv.Error) as error:
+        raise ConversationLogError("Could not append conversation log") from error
+
+
 def create_llm_client() -> tuple[OpenAI, str]:
     load_dotenv()
     api_key = os.getenv("GROQ_API_KEY", "").strip()
@@ -272,13 +336,25 @@ def run_agent_turn(
     messages: list[dict[str, Any]] | None = None,
     max_iterations: int = DEFAULT_MAX_AGENT_ITERATIONS,
     tool_executor: Callable[[str, Mapping[str, Any]], str] = dispatch_tool,
+    event_logger: Callable[[str, str, str | None], None] | None = None,
 ) -> str:
     if not user_message.strip():
         raise ValueError("User message cannot be empty")
     if max_iterations < 1:
         raise ValueError("max_iterations must be a positive integer")
 
+    def log_event(actor: str, message: str, tool_call: str | None = None) -> None:
+        if event_logger is None:
+            return
+        try:
+            event_logger(actor, message, tool_call)
+        except ConversationLogError:
+            raise
+        except Exception as error:
+            raise ConversationLogError("Could not append conversation log") from error
+
     conversation = messages if messages is not None else []
+    log_event("user", user_message)
     conversation.append({"role": "user", "content": user_message})
 
     for _iteration in range(max_iterations):
@@ -304,6 +380,7 @@ def run_agent_turn(
 
         if not tool_calls:
             conversation.append(assistant_message)
+            log_event("agent", response_message.content or "")
             return response_message.content or ""
 
         assistant_message["tool_calls"] = [
@@ -318,13 +395,18 @@ def run_agent_turn(
             for tool_call in tool_calls
         ]
         conversation.append(assistant_message)
+        log_event("agent", response_message.content or "")
 
         for tool_call in tool_calls:
             if not tool_call.id:
                 raise AgentProviderError("The LLM returned a tool call without an ID")
 
+            tool_name = tool_call.function.name
+            raw_arguments = tool_call.function.arguments or "{}"
+            log_event("agent", raw_arguments, tool_name)
+
             try:
-                arguments = json.loads(tool_call.function.arguments or "{}")
+                arguments = json.loads(raw_arguments)
             except (json.JSONDecodeError, TypeError):
                 result = _argument_error("Tool arguments are not valid JSON")
             else:
@@ -332,15 +414,16 @@ def run_agent_turn(
                     result = _argument_error("Tool arguments must be a JSON object")
                 else:
                     try:
-                        result = tool_executor(tool_call.function.name, arguments)
+                        result = tool_executor(tool_name, arguments)
                     except Exception:
                         result = _json_result({"error": "Tool execution failed"})
 
+            log_event("tool", result, tool_name)
             conversation.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "name": tool_call.function.name,
+                    "name": tool_name,
                     "content": result,
                 }
             )
@@ -385,11 +468,15 @@ def main() -> int:
                 model,
                 messages=conversation,
                 max_iterations=max_iterations,
+                event_logger=append_conversation_event,
             )
         except AgentProviderError as error:
             print(f"Agent request failed: {error}")
         except AgentLoopLimitError as error:
             print(f"Agent stopped: {error}")
+        except ConversationLogError as error:
+            print(f"Conversation logging failed: {error}")
+            return 1
         except KeyboardInterrupt:
             print("\nSession ended.")
             return 0

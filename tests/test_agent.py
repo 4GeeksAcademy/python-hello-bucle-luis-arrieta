@@ -359,6 +359,52 @@ def test_run_agent_turn_supports_add_then_check_alerts_across_iterations():
     ]
 
 
+def test_run_agent_turn_logs_user_agent_and_tool_events_in_order():
+    llm_client = FakeLLM(
+        make_llm_response(
+            tool_calls=[make_tool_call("call-list", "list_inventory", {})]
+        ),
+        make_llm_response("Inventory is empty."),
+    )
+    events = []
+
+    def log_event(actor, message, tool_call=None):
+        events.append((actor, message, tool_call))
+
+    answer = run_agent_turn(
+        "Show inventory",
+        llm_client,
+        "test-model",
+        tool_executor=lambda name, arguments: "[]",
+        event_logger=log_event,
+    )
+
+    assert answer == "Inventory is empty."
+    assert events == [
+        ("user", "Show inventory", None),
+        ("agent", "", None),
+        ("agent", "{}", "list_inventory"),
+        ("tool", "[]", "list_inventory"),
+        ("agent", "Inventory is empty.", None),
+    ]
+
+
+def test_run_agent_turn_stops_before_llm_if_user_event_cannot_be_logged():
+    llm_client = FakeLLM(make_llm_response("This should not be returned."))
+
+    with pytest.raises(agent_module.ConversationLogError):
+        run_agent_turn(
+            "Show inventory",
+            llm_client,
+            "test-model",
+            event_logger=lambda actor, message, tool_call: (_ for _ in ()).throw(
+                agent_module.ConversationLogError("disk full")
+            ),
+        )
+
+    assert llm_client.calls == []
+
+
 def test_run_agent_turn_returns_invalid_tool_json_to_the_llm():
     malformed_call = SimpleNamespace(
         id="call-malformed",
@@ -369,12 +415,16 @@ def test_run_agent_turn_returns_invalid_tool_json_to_the_llm():
         make_llm_response("I could not parse that request."),
     )
     executor_calls = []
+    events = []
 
     answer = run_agent_turn(
         "Add a product",
         llm_client,
         "test-model",
         tool_executor=lambda name, arguments: executor_calls.append(name) or "{}",
+        event_logger=lambda actor, message, tool_call: events.append(
+            (actor, message, tool_call)
+        ),
     )
 
     assert answer == "I could not parse that request."
@@ -382,6 +432,7 @@ def test_run_agent_turn_returns_invalid_tool_json_to_the_llm():
     tool_result = llm_client.calls[1]["messages"][-1]
     assert tool_result["tool_call_id"] == "call-malformed"
     assert json.loads(tool_result["content"])["error"] == "Invalid tool arguments"
+    assert ("agent", "{", "create_product") in events
 
 
 def test_run_agent_turn_enforces_iteration_limit():
@@ -530,6 +581,7 @@ def test_main_runs_cli_and_preserves_history_between_user_turns(monkeypatch, cap
     )
     monkeypatch.setattr(agent_module, "get_max_agent_iterations", lambda: 2)
     monkeypatch.setattr(agent_module, "check_api_available", lambda: None)
+    monkeypatch.setattr(agent_module, "append_conversation_event", lambda *args: None)
     user_messages = iter(["First question", "Second question", "/exit"])
     monkeypatch.setattr("builtins.input", lambda prompt: next(user_messages))
 
@@ -553,6 +605,7 @@ def test_main_exits_cleanly_on_eof(monkeypatch, capsys):
     )
     monkeypatch.setattr(agent_module, "get_max_agent_iterations", lambda: 2)
     monkeypatch.setattr(agent_module, "check_api_available", lambda: None)
+    monkeypatch.setattr(agent_module, "append_conversation_event", lambda *args: None)
 
     def end_input(prompt):
         raise EOFError
